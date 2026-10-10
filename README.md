@@ -8,7 +8,8 @@ other branches and tags are KiCad's history, so clone with `--single-branch`.
 GitHub releases named `cli-<kicad version>-<n>` (for example `cli-10.0.6-1`), each holding a trimmed
 `kicad-cli` from that KiCad release. It contains only what `kicad-cli sch ...`, `fp ...` and `pcb ...`
 need: the schematic module, the footprint-assignment one (`sch erc` loads it), the PCB one (every `fp`
-and `pcb` command: gerbers, drill, STEP, SVG, 3D renders, board import) and their shared libraries. Up to `cli-10.0.6-3` they are the official, unmodified binaries; a
+and `pcb` command: gerbers, drill, STEP, VRML, SVG, 3D renders, board import), the 3D model plugins (STEP,
+VRML, IDF; renders draw the models a board brings with them) and their shared libraries. Up to `cli-10.0.6-3` they are the official, unmodified binaries; a
 release built with `--simee-ref simee/<version>` has KiCad's own files built from that branch (see
 "Patching KiCad") on the official release's third-party libraries, and its source asset is the
 branch's.
@@ -54,13 +55,15 @@ registries (`vcpkg-registries/`, a few MB) aren't pruned.
 How it works: download the official installer (cached in `~/.cache/kicad-bundle`), copy out the app,
 walk the shared-library closure of `kicad-cli` + the kifaces it loads (`otool -L` / PE imports): eeschema's,
 cvpcb's, which `sch erc` needs for its footprint checks, and pcbnew's, which links opencascade
-(`bundle.KIFACES`). Drop
+(`bundle.KIFACES`), and of the 3D model plugins (`bundle.PLUGINS_3D`), which KiCad `dlopen`s from its plugin
+folder so no import reaches them. Drop
 everything else (on Windows also the app-local Universal CRT, `api-ms-win-*.dll` and `ucrtbase.dll`,
 which Windows 10 and later never load), thin and re-sign per architecture on macOS, then smoke-test before
 archiving: export the netlist of a known RC filter and run ERC on it, comparing KiCad's nets and ERC
 errors; upgrade a KiCad 5 footprint library (`fp upgrade`); export the filter's board as gerbers
-(their pads must carry the schematic's nets), drill (its four holes), STEP and SVG, and render it in 3D
-(`kicad_bundle/smoke/`; see "Drawing a board").
+(their pads must carry the schematic's nets), drill (its four holes), STEP, VRML and SVG, and render it in 3D,
+bare and with each of its STEP and VRML exports as a 3D model on a footprint (`kicad_bundle/smoke/`; see
+"Drawing a board").
 
 ### Drawing a board
 
@@ -83,9 +86,16 @@ byte for byte, on macOS arm64 and Linux arm64. KiCad 10.0.6 makes the image up t
 asked (1568 x 872 for the default 1600 x 900, 368 x 168 for 400 x 200), so scale it rather than expect the
 exact size.
 
-The bundle has no 3D models (KiCad's library is 3.1 GB) nor the plugins that load them (`PlugIns/3d`), so
-`pcb render` draws the board, its copper, mask and silkscreen, and no component bodies. Boards imported
-from Eagle have no models anyway. Bundling the plugins for boards that bring their own models is #28.
+The bundle has no 3D models (KiCad's library is 3.1 GB), but it has the plugins that load them (STEP, VRML
+and IDF; #28), so `pcb render` draws the component bodies of a board that brings its own models: embedded in
+the board (KiCad 9+), next to it (`${KIPRJMOD}/...`), or anywhere a path variable set in the environment points
+(simee-db's LCSC parts name theirs with `${SIMEE_LCSC_DIR}`). A model it can't find is left out, so a board
+whose footprints name KiCad's library (`${KICAD10_3DMODEL_DIR}`) renders without bodies, as do boards imported
+from Eagle, which have no models. The smoke test renders the filter board with its own STEP and VRML exports as
+a model, half size and lifted over R1, and each render must differ from the bare one (renders are
+deterministic). The plugins live where KiCad looks for them: `KiCad.app/Contents/PlugIns/3d` on macOS,
+`bin\plugins\3d` on Windows, and on Linux `libexec/plugins/3d`, which the wrapper names to KiCad (below).
+They add 0.9 to 1.9 MB unpacked (0.4 to 0.6 MB to each download).
 
 `pcb import` turns another tool's board into a `.kicad_pcb` (Eagle, Altium, CADSTAR, PADS, ...; KiCad
 10.0.6's own command, unlike `sch import`): `kicad-cli pcb import --format eagle -o board.kicad_pcb
@@ -95,8 +105,10 @@ board.brd`. Upstream's left Eagle boards with fiducials or logos on a restrict l
 Linux has no official relocatable build, so the Linux bundle comes from the official `kicad/kicad:<v>`
 Docker image (Debian, amd64 only): `docker export` its filesystem, walk the ELF `DT_NEEDED` closure of
 `kicad-cli` + the kifaces, and copy every library except glibc into `lib/` under the name the loader
-asks for. `bin/kicad-cli` sets `LD_LIBRARY_PATH` and `KICAD_STOCK_DATA_HOME` (KiCad otherwise looks for
-its data in `/usr/share/kicad`) and runs `libexec/kicad-cli`. The smoke test runs in a bare `ubuntu:24.04`
+asks for. `bin/kicad-cli` sets `LD_LIBRARY_PATH`, `KICAD_STOCK_DATA_HOME` (KiCad otherwise looks for
+its data in `/usr/share/kicad`) and `KICAD_STOCK_3D_PLUGINS_HOME` (its 3D plugins, otherwise in
+`/usr/lib/<multiarch>/kicad/plugins/3d`; only `simee/<version>` reads it, so a bundle of the official binaries
+renders no models and its smoke test doesn't ask it to) and runs `libexec/kicad-cli`. The smoke test runs in a bare `ubuntu:24.04`
 container, which proves both the glibc floor and that nothing is missing from `lib/`. The bundle is
 larger than the macOS one (about 210 MB, against 90) because eeschema links wx's webview, which pulls in
 WebKitGTK. pcbnew's kiface and opencascade add about 30 MB to each bundle (50 on Linux).
@@ -237,6 +249,10 @@ review; a human then creates `simee/<version>` from it.
   wire on tRestrict (Adafruit draws its fiducials and logos there) was saved on layer `UNDEFINED` and every
   later command failed with "One or more items were found on undefined layers". Upstream master has the
   same bug (#20).
+- `KICAD_STOCK_3D_PLUGINS_HOME` names the folder of KiCad's 3D model plugins, as `KICAD_STOCK_DATA_HOME`
+  names its data: on Linux KiCad otherwise only looks in the compiled-in absolute
+  `/usr/lib/<multiarch>/kicad/plugins/3d` (or under `APPDIR`, with a hard-coded x86_64 triplet), so the
+  relocatable bundle couldn't load its plugins (#28).
 
 To build them into a bundle: `uv run kicad-bundle --kicad-version 10.0.6 --platform linux --simee-ref
 simee/10.0.6` (the package workflow's `simee_ref` input does the same; it resolves the branch to one

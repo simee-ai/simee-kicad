@@ -28,12 +28,13 @@ def test_vcpkg_commit_is_the_one_build_ps1_pinned_when_kicad_published_the_insta
 
 
 def _official(bin_dir: Path) -> None:
-    for name in ("kicad-cli.exe", "_eeschema.dll", "kicommon.dll", "kigal.dll", "kiapi.dll", *THIRD_PARTY):
+    for name in ("kicad-cli.exe", "_eeschema.dll", "kicommon.dll", "kigal.dll", "kiapi.dll", *THIRD_PARTY,
+                 "plugins/3d/s3d_plugin_oce.dll"):
         make_pe(bin_dir / name)
 
 
 def _built(built: Path, names=("kicad-cli.exe", "_eeschema.dll", "kicommon.dll", "kigal.dll", "kiapi.dll",
-                               "kicad_3dsg.dll"), linker=(14, 44)) -> None:
+                               "kicad_3dsg.dll", "s3d_plugin_oce.dll"), linker=(14, 44)) -> None:
     for name in names:
         make_pe(built / name, linker)
         (built / name).write_bytes((built / name).read_bytes() + b"simee")
@@ -68,7 +69,8 @@ def test_overlay_replaces_every_kicad_file_and_leaves_third_party_ones(tmp_path)
     _official(bin_dir)
     _built(built)
     replaced = windows_build.overlay(bin_dir, built)
-    assert replaced == ["_eeschema.dll", "kiapi.dll", "kicad-cli.exe", "kicommon.dll", "kigal.dll"]
+    assert replaced == ["_eeschema.dll", "kiapi.dll", "kicad-cli.exe", "kicommon.dll", "kigal.dll",
+                        "plugins/3d/s3d_plugin_oce.dll"]
     for name in replaced:
         assert (bin_dir / name).read_bytes().endswith(b"simee")
     for name in THIRD_PARTY:
@@ -81,6 +83,14 @@ def test_overlay_refuses_to_leave_an_official_kicad_file(tmp_path):
     _official(bin_dir)
     _built(built, names=("kicad-cli.exe", "_eeschema.dll", "kicommon.dll", "kiapi.dll"))
     with pytest.raises(RuntimeError, match="kigal.dll"):
+        windows_build.overlay(bin_dir, built)
+
+
+def test_overlay_refuses_to_leave_an_official_3d_plugin(tmp_path):
+    bin_dir, built = tmp_path / "bundle/bin", tmp_path / "built"
+    _official(bin_dir)
+    _built(built, names=("kicad-cli.exe", "_eeschema.dll", "kicommon.dll", "kigal.dll", "kiapi.dll"))
+    with pytest.raises(RuntimeError, match="s3d_plugin_oce.dll"):
         windows_build.overlay(bin_dir, built)
 
 
@@ -118,7 +128,8 @@ def test_overlay_accepts_a_dll_another_official_file_imports(tmp_path, monkeypat
     bin_dir, built = tmp_path / "bundle/bin", tmp_path / "built"
     _official(bin_dir)
     make_pe(bin_dir / "_cvpcb.dll")
-    _built(built, names=("kicad-cli.exe", "_eeschema.dll", "_cvpcb.dll", "kicommon.dll", "kigal.dll", "kiapi.dll"))
+    _built(built, names=("kicad-cli.exe", "_eeschema.dll", "_cvpcb.dll", "kicommon.dll", "kigal.dll", "kiapi.dll",
+                         "s3d_plugin_oce.dll"))
     official = {"_cvpcb.dll": ["api-ms-win-core-file-l1-1-0.dll", "kicommon.dll"],
                 "_eeschema.dll": ["kernel32.dll", "kicommon.dll"]}
     simee = {"_cvpcb.dll": ["KERNEL32.dll", "kicommon.dll"]}
@@ -144,9 +155,11 @@ def test_built_files_are_found_once_each_outside_vcpkgs_tree(tmp_path):
     make_pe(build / "kicad/kicad-cli.exe")
     make_pe(build / "eeschema/_eeschema.dll")
     make_pe(build / "common/kicommon.dll")
+    make_pe(build / "plugins/3d/oce/s3d_plugin_oce.dll")
     make_pe(build / "vcpkg_installed/x64-windows/bin/kicommon.dll")
     found = windows_build.collect_built(build, tmp_path / "out")
-    assert sorted(p.name for p in found.iterdir()) == ["_eeschema.dll", "kicad-cli.exe", "kicommon.dll"]
+    assert sorted(p.name for p in found.iterdir()) == ["_eeschema.dll", "kicad-cli.exe", "kicommon.dll",
+                                                       "s3d_plugin_oce.dll"]
     make_pe(build / "other/kicommon.dll")
     with pytest.raises(RuntimeError, match="kicommon.dll"):
         windows_build.collect_built(build, tmp_path / "out")

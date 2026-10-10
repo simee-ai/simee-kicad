@@ -3,7 +3,7 @@
 KiCad's Windows release is built by kicad-win-builder (build.ps1): MSVC, and vcpkg in manifest mode
 from the source tree's vcpkg.json and vcpkg-configuration.json, which pin every port's version. The
 branch keeps those files, so the same vcpkg tool commit builds the same ports, and KiCad is configured
-with build.ps1's options. Only KiCad's own files (kicad-cli.exe, the kifaces _*.dll, ki*.dll) are replaced;
+with build.ps1's options. Only KiCad's own files (kicad-cli.exe, the kifaces _*.dll, the 3D plugins, ki*.dll) are replaced;
 the third-party DLLs, their notices and their sources stay as windows.package made them. So our files
 must be linked by the MSVC version that linked the official ones (the bundle keeps KiCad's C++ runtime,
 which must be at least as new) and import nothing the official ones didn't.
@@ -20,7 +20,7 @@ from pathlib import Path
 import pefile
 
 from kicad_bundle import bundle, gitlab, pe
-from kicad_bundle.bundle import KIFACES
+from kicad_bundle.bundle import KIFACES, PLUGINS_3D
 from kicad_bundle.cache import VCPKG_BINARIES
 from kicad_bundle.fetch import Fetch, cached_file, fetch_url
 from kicad_bundle.windows_third_party import KICAD
@@ -31,8 +31,10 @@ TRIPLET = "x64-windows"
 # build.ps1's KiCad options, less translations (the bundle has none) and Sentry (KiCad's crash reports).
 CMAKE_FLAGS = ("-Wno-dev", "-DCMAKE_BUILD_TYPE=Release", "-DKICAD_BUILD_QA_TESTS=OFF", "-DKICAD_BUILD_I18N=OFF",
                "-DKICAD_WIN32_DPI_AWARE=ON", "-DKICAD_SCRIPTING_WXPYTHON=ON")
-# kicad-cli and the kifaces; they pull in kicommon, kigal, kiapi and kicad_3dsg.
-TARGETS = ("kicad-cli", *(f"{k}_kiface" for k in KIFACES))
+# kicad-cli, the kifaces and the 3D plugins; they pull in kicommon, kigal, kiapi and kicad_3dsg.
+TARGETS = ("kicad-cli", *(f"{k}_kiface" for k in KIFACES), *(f"s3d_plugin_{p}" for p in PLUGINS_3D))
+# The 3D plugins, relative to bin\ (KiCad looks for them next to its executable, in plugins\3d).
+PLUGINS = tuple(f"plugins/3d/s3d_plugin_{p}.dll" for p in PLUGINS_3D)
 # KiCad's configure needs SWIG (pcbnew's Python bindings); build.ps1 puts this one on PATH.
 SWIG_URL = ("https://sourceforge.net/projects/swig/files/swigwin/swigwin-4.3.1/swigwin-4.3.1.zip/download"
             "?use_mirror=pilotfiber")
@@ -71,21 +73,24 @@ def parse_env(text: str) -> dict[str, str]:
 
 
 def overlay(bin_dir: Path, built: Path) -> list[str]:
-    """Replace every KiCad file in bin_dir with built's; returns their names. Refuses to leave any
+    """Replace every KiCad file in bin_dir and its plugins/3d with built's; returns their paths relative to
+    bin_dir. Refuses to leave any
     official, or to ship one linked by another MSVC or importing a DLL no official file in bin_dir
 imports (one the bundle lacks, or a Windows DLL it never relied on). Windows API sets, api-ms-win-*,
 aside: Windows resolves them itself, which ones a file names depends on the Windows SDK (the official
 _cvpcb.dll reaches the kernel only through them, ours through KERNEL32.dll), and the smoke test
 proves they load."""
-    files = sorted(p for p in bin_dir.iterdir() if p.is_file())
-    names = [p.name for p in files if KICAD.fullmatch(p.name)]
+    plugins = bin_dir / Path(PLUGINS[0]).parent
+    files = sorted(p for d in (bin_dir, plugins) if d.is_dir() for p in d.iterdir() if p.is_file())
+    names = [p.relative_to(bin_dir).as_posix() for p in files if KICAD.fullmatch(p.name)]
     official = {d.lower() for p in files if p.suffix.lower() in (".exe", ".dll") for d in pe.deps(p)}
     problems = []
-    for name in (n for n in names if (built / n).is_file()):
-        ours, theirs = toolset(built / name), toolset(bin_dir / name)
+    for name in (n for n in names if (built / Path(n).name).is_file()):
+        ours, theirs = toolset(built / Path(name).name), toolset(bin_dir / name)
         if ours != theirs:
             problems.append(f"{name} was linked by MSVC {ours}, the official one by {theirs}")
-        if added := [d for d in pe.deps(built / name) if d.lower() not in official and not pe.UCRT.fullmatch(d)]:
+        if added := [d for d in pe.deps(built / Path(name).name)
+                     if d.lower() not in official and not pe.UCRT.fullmatch(d)]:
             problems.append(f"{name} imports {', '.join(added)}, which no official file does")
     if problems:
         raise RuntimeError("the simee build doesn't match the official one:\n  " + "\n  ".join(problems))
@@ -173,7 +178,7 @@ def _vcpkg(root: Path, commit: str) -> Path:
 
 
 def build(src: Path, work: Path, cache: Path, version: str, vcpkg_at: str) -> Path:
-    """Build kicad-cli and the kifaces from src (a source tarball) with MSVC version (the official
+    """Build kicad-cli, the kifaces and the 3D plugins from src (a source tarball) with MSVC version (the official
     build's) and vcpkg at commit vcpkg_at (vcpkg_commit); returns the folder holding KiCad's binaries.
     vcpkg's builds of the ports are kept in <cache>/vcpkg-binaries (several GB), so a rebuild only compiles KiCad (about an hour)."""
     if os.name != "nt":

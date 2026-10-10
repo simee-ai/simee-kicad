@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from kicad_bundle import bundle, debian
-from kicad_bundle.bundle import KIFACES
+from kicad_bundle.bundle import KIFACES, PLUGINS_3D
 from kicad_bundle.elf import ARCHES, Arch
 
 # kicad-docker's build dependencies, less what only its QA run or library installs need.
@@ -36,9 +36,13 @@ BUILD_DEPS = (
 # kicad-docker's cmake options (KICAD_BUILD_I18N only adds translations, which the bundle leaves out).
 CMAKE_FLAGS = ("-G Ninja -DCMAKE_BUILD_TYPE=Release -DKICAD_SCRIPTING_WXPYTHON=ON -DKICAD_USE_OCC=ON "
                "-DKICAD_SPICE=ON -DKICAD_BUILD_I18N=OFF -DCMAKE_INSTALL_PREFIX=/usr -DKICAD_USE_CMAKE_FINDPROTOBUF=ON")
-# The bundle's KiCad files: libexec/<binary> and lib/<library>.
+# The bundle's KiCad files: libexec/<binary>, PLUGINS_DIR/<plugin> and lib/<library>.
 BINARIES = ("kicad-cli", *(f"_{k}.kiface" for k in KIFACES))
-NINJA_TARGETS = " ".join(("kicad-cli", *(f"{k}_kiface" for k in KIFACES)))
+PLUGINS = tuple(f"libs3d_plugin_{p}.so" for p in PLUGINS_3D)
+# Where the bundle keeps the 3D plugins; its wrapper names it to KiCad (KICAD_STOCK_3D_PLUGINS_HOME, a
+# simee/<version> change: KiCad otherwise looks in the absolute /usr/lib/<multiarch>/kicad/plugins/3d).
+PLUGINS_DIR = "libexec/plugins/3d"
+NINJA_TARGETS = " ".join(("kicad-cli", *(f"{k}_kiface" for k in KIFACES), *(f"s3d_plugin_{p}" for p in PLUGINS_3D)))
 KICAD_LIBS = "libki*"
 SOURCES = "dpkg-sources.txt"
 
@@ -58,7 +62,7 @@ def _snapshot(stamp: str, scheme: str = "https") -> str:
 
 
 def dockerfile(image: str, stamp: str) -> str:
-    """Build kicad-cli and the kifaces (with the libki* they need) from kicad-src.tar.gz into
+    """Build kicad-cli, the kifaces and the 3D plugins (with the libki* they need) from kicad-src.tar.gz into
     /out, on image, with Debian's archive at stamp and the image's packages held."""
     return f"""FROM {image}
 USER root
@@ -71,7 +75,7 @@ RUN mkdir -p /src/kicad/build && tar -xzf /src/kicad-src.tar.gz -C /src/kicad --
 WORKDIR /src/kicad/build
 RUN cmake {CMAKE_FLAGS} .. && ninja {NINJA_TARGETS}
 RUN mkdir /out && \\
-    find . \\( {" -o ".join(f"-name {b}" for b in BINARIES)} -o -name '{KICAD_LIBS}.so.*' \\) -type f -exec cp {{}} /out/ \\; && \\
+    find . \\( {" -o ".join(f"-name {b}" for b in (*BINARIES, *PLUGINS))} -o -name '{KICAD_LIBS}.so.*' \\) -type f -exec cp {{}} /out/ \\; && \\
     strip --strip-unneeded /out/* && \\
     dpkg-query -W -f '${{Package}}\\t${{source:Package}}\\t${{source:Version}}\\n' > /out/{SOURCES}
 """
@@ -93,12 +97,12 @@ def _unversioned(name: str) -> str:
 
 
 def overlay(root: Path, built: Path) -> list[str]:
-    """Replace the bundle's KiCad files (libexec/<binary>, lib/libki*) with those in built; returns the
+    """Replace the bundle's KiCad files (libexec/<binary>, the 3D plugins, lib/libki*) with those in built; returns the
     replaced paths. Refuses to leave any official KiCad file in place. A build of another version than the
     image's (a release-candidate rehearsal) names KiCad's libraries by its own version
     (libkicommon.so.10.0.7 for libkicommon.so.10.0.6): those replace the image's."""
     by_stem = {_unversioned(p.name): p.name for p in built.glob(f"{KICAD_LIBS}.so*")}
-    targets = [f"libexec/{b}" for b in BINARIES]
+    targets = [*(f"libexec/{b}" for b in BINARIES), *(f"{PLUGINS_DIR}/{p}" for p in PLUGINS)]
     for official in sorted((root / "lib").glob(KICAD_LIBS)):
         if official.is_symlink():
             continue
@@ -107,6 +111,11 @@ def overlay(root: Path, built: Path) -> list[str]:
             official.unlink()
         targets.append(f"lib/{new}")
     return bundle.overlay(root, targets, built)
+
+
+def plugins_dir(arch: Arch) -> str:
+    """Where KiCad's image keeps its 3D plugins (KICAD_PLUGINDIR/kicad/plugins/3d)."""
+    return f"usr/lib/{arch.multiarch}/kicad/plugins/3d"
 
 
 def _docker_build(context: Path, tag: str, arch: Arch) -> None:
@@ -195,6 +204,9 @@ def native_context(context: Path, runtime: str, built: Path, rootfs: Path, arch:
         shutil.copy2(built / name, context / "usr/bin" / name)
     for lib in built.glob(f"{KICAD_LIBS}.so*"):
         shutil.copy2(lib, context / "usr/lib" / arch.multiarch / lib.name)
+    (plugins := context / plugins_dir(arch)).mkdir(parents=True)
+    for name in PLUGINS:
+        shutil.copy2(built / name, plugins / name)
     for d in data:
         shutil.copytree(rootfs / d, context / d, symlinks=True)
     (context / "Dockerfile").write_text(f"FROM {runtime}\nCOPY usr/ /usr/\n")

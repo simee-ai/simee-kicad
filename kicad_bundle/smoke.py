@@ -1,6 +1,7 @@
 """Prove a bundle works: export the netlist of a known RC filter and compare KiCad's nets, run KiCad's
 electrical rules check on it and compare the errors, then run what pcbnew does (upgrade a footprint
-library; export the filter's board as gerbers, drill, STEP and SVG, render it in 3D) and check each output."""
+library; export the filter's board as gerbers, drill, STEP, VRML and SVG, render it in 3D, with and without
+3D models made of it) and check each output."""
 
 import json
 import os
@@ -22,6 +23,7 @@ EXPECTED_ERC = [("power_pin_not_driven", "Symbol #PWR01 Pin 1 [Power input, Line
 BOARD = SCHEMATIC.with_suffix(".kicad_pcb")
 EXPECTED_HOLES = 4
 BOARD_SIZE = (20.0, 10.0)  # its outline, mm
+BOARD_CENTRE = (110.0, 100.0)  # of its outline: the origin of the models made of it, mm
 # How simee-db draws a board (simee UI.md 5.7): its top copper, mask, silkscreen and outline in one flat SVG
 # of the board's area, and a 3D view from the top. KiCad's SVG of the board area is a little off its outline
 # (19.9898 x 9.9822 mm for the filter), and its render up to 32 pixels smaller than asked (368 x 168 for
@@ -30,6 +32,9 @@ SVG_LAYERS = "F.Cu,F.Mask,F.SilkS,Edge.Cuts"
 SVG_TOLERANCE = 0.1
 RENDER_SIZE = (400, 200)
 RENDER_SHORTFALL = 32
+# A 3D model on a footprint, as a board that brings its own models refers to it (next to the board): a
+# smoke board model, half size and 3 mm up, so it covers part of the board in a top view.
+MODEL = '(model "{path}" (offset (xyz 0 0 3)) (scale (xyz 0.5 0.5 0.5)) (rotate (xyz 0 0 0)))'
 # A footprint library in KiCad 5's format, which `fp upgrade` rewrites in the current one.
 FOOTPRINTS = SCHEMATIC.parent / "footprints.pretty"
 EXPECTED_FOOTPRINTS = ["R_Axial_P5.08mm"]
@@ -141,10 +146,10 @@ def run(cli: list[str], args: list[str], out: Path) -> Path:
     return out
 
 
-def _check_pcbnew(cli: list[str], tmp: Path) -> None:
+def _check_pcbnew(cli: list[str], tmp: Path, models: bool = True) -> None:
     """Raise unless pcbnew's commands work: `fp upgrade` rewrites FOOTPRINTS in the current format, and
-    BOARD's gerbers have its nets' pads and its outline, its drill file its holes, its STEP file a header,
-    and it draws (check_drawings)."""
+    BOARD's gerbers have its nets' pads and its outline, its drill file its holes, its STEP and VRML files a
+    header, and it draws (check_drawings), with those files as 3D models too (check_models) if models."""
     up = run(cli, ["fp", "upgrade", "-o", str(tmp / "upgraded.pretty"), str(FOOTPRINTS)], tmp / "upgraded.pretty")
     upgraded = sorted(p.stem for p in up.glob("*.kicad_mod") if p.read_text().startswith("(footprint "))
     if upgraded != EXPECTED_FOOTPRINTS:
@@ -165,32 +170,74 @@ def _check_pcbnew(cli: list[str], tmp: Path) -> None:
         raise RuntimeError(f"the drill files have {holes} holes, wanted {EXPECTED_HOLES}")
 
     # STEP goes through opencascade, the bulk of pcbnew's libraries.
-    step = run(cli, ["pcb", "export", "step", "-o", str(tmp / "board.step"), str(board)], tmp / "board.step")
+    origin = "{}x{}mm".format(*BOARD_CENTRE)
+    step = run(cli, ["pcb", "export", "step", "--user-origin", origin, "-o", str(tmp / "board.step"), str(board)],
+               tmp / "board.step")
     if not step.read_text().startswith("ISO-10303-21;"):
         raise RuntimeError("pcb export step wrote no STEP file")
+    # VRML in tenths of an inch, the unit KiCad reads a VRML model in.
+    vrml = run(cli, ["pcb", "export", "vrml", "--units", "tenths", "--user-origin", origin, "-o", str(tmp / "board.wrl"),
+                     str(board)], tmp / "board.wrl")
+    if not vrml.read_text().startswith("#VRML V2.0"):
+        raise RuntimeError("pcb export vrml wrote no VRML file")
 
-    check_drawings(cli, board, BOARD_SIZE, tmp)
+    bare = check_drawings(cli, board, BOARD_SIZE, tmp)
+    if models:
+        check_models(cli, bare, [step, vrml], tmp)
 
 
-def check_drawings(cli: list[str], board: Path, size: tuple[float, float], tmp: Path) -> None:
+def with_model(board: str, path: str) -> str:
+    """board's text with a 3D model (path, as a .kicad_pcb names it) on its first footprint."""
+    start = board.index("(footprint ")
+    depth = 0
+    for tok in TOKEN.finditer(board, start):
+        depth += {"(": 1, ")": -1}.get(tok.group(), 0)
+        if depth == 0:
+            return f"{board[:tok.start()]}\t{MODEL.format(path=path)}\n{board[tok.start():]}"
+    raise RuntimeError("the board's first footprint never ends")
+
+
+def render(cli: list[str], board: Path, out: Path) -> bytes:
+    """board's `pcb render` from the top at RENDER_SIZE, written to out (checked to be that size)."""
+    width, height = RENDER_SIZE
+    png = run(cli, ["pcb", "render", "--side", "top", "-w", str(width), "-h", str(height), "-o", str(out),
+                    str(board)], out).read_bytes()
+    made = png_size(png)
+    if any(not want - RENDER_SHORTFALL <= got <= want for got, want in zip(made, RENDER_SIZE)):
+        raise RuntimeError(f"pcb render made a {made} image, wanted {RENDER_SIZE}")
+    return png
+
+
+def check_models(cli: list[str], bare: bytes, models: list[Path], tmp: Path) -> None:
+    """Raise unless `pcb render` draws each of models (files KiCad's 3D plugins load: STEP, VRML) that BOARD
+    brings next to it (${KIPRJMOD}), on a footprint: the render must differ from the bare one. Renders are
+    deterministic, and without the plugins KiCad draws the board bare (#28)."""
+    for model in models:
+        folder = tmp / f"model-{model.suffix[1:]}"
+        folder.mkdir()
+        shutil.copy2(model, folder / f"model{model.suffix}")
+        board = folder / BOARD.name
+        board.write_text(with_model(BOARD.read_text(), f"${{KIPRJMOD}}/model{model.suffix}"))
+        if render(cli, board, folder / "board.png") == bare:
+            raise RuntimeError(f"pcb render drew no {model.suffix} 3D model: are the 3D plugins bundled?")
+
+
+def check_drawings(cli: list[str], board: Path, size: tuple[float, float], tmp: Path) -> bytes:
     """Raise unless `pcb export svg` draws board (a board in a folder of its own, where pcbnew may write)
-    the size of its outline (mm) and `pcb render` renders it in 3D. Both run without a display (#20)."""
+    the size of its outline (mm) and `pcb render` renders it in 3D; returns the render. Both run without a
+    display (#20)."""
     svg = run(cli, ["pcb", "export", "svg", "--mode-single", "--layers", SVG_LAYERS, "--page-size-mode", "2",
                      "--exclude-drawing-sheet", "-o", str(tmp / "board.svg"), str(board)], tmp / "board.svg")
     drawn = svg_size(svg.read_text())
     if any(abs(a - b) > SVG_TOLERANCE for a, b in zip(drawn, size)):
         raise RuntimeError(f"pcb export svg drew {drawn} mm, wanted the board's {size}")
-    width, height = RENDER_SIZE
-    png = run(cli, ["pcb", "render", "--side", "top", "-w", str(width), "-h", str(height),
-                     "-o", str(tmp / "board.png"), str(board)], tmp / "board.png")
-    made = png_size(png.read_bytes())
-    if any(not want - RENDER_SHORTFALL <= got <= want for got, want in zip(made, RENDER_SIZE)):
-        raise RuntimeError(f"pcb render made a {made} image, wanted {RENDER_SIZE}")
+    return render(cli, board, tmp / "board.png")
 
 
-def check(cli: list[str]) -> None:
+def check(cli: list[str], models: bool = True) -> None:
     """Raise unless `cli sch export netlist` reproduces the expected nets, `cli sch erc` the expected
-    errors (ERC also needs the cvpcb kiface) and pcbnew's commands their outputs (_check_pcbnew)."""
+    errors (ERC also needs the cvpcb kiface) and pcbnew's commands their outputs (_check_pcbnew; models:
+    renders draw 3D models, which a Linux bundle can only do when built from a simee/<version> branch)."""
     with tempfile.TemporaryDirectory() as tmp:
         net, erc = Path(tmp) / "smoke.net", Path(tmp) / "smoke-erc.json"
         nets = netlist_nets(run(cli, ["sch", "export", "netlist", "-o", str(net), str(SCHEMATIC)], net).read_text())
@@ -200,4 +247,4 @@ def check(cli: list[str]) -> None:
             raise RuntimeError(f"unexpected nets {nets}, wanted {EXPECTED}")
         if errors != EXPECTED_ERC:
             raise RuntimeError(f"unexpected ERC errors {errors}, wanted {EXPECTED_ERC}")
-        _check_pcbnew(cli, Path(tmp))
+        _check_pcbnew(cli, Path(tmp), models)

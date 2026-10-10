@@ -45,7 +45,8 @@ def test_extract_keeps_only_what_the_closure_can_need(tmp_path):
 
 def _image(rootfs, extra_lib: str | None = None, multiarch: str = "x86_64-linux-gnu"):
     """A fake extracted image: kicad-cli -> libkicommon -> libc, the kiface -> libgit2 (from Debian's
-    libgit2-1.9, whose copyright file is reached through a symlinked doc dir), plus the schemas."""
+    libgit2-1.9, whose copyright file is reached through a symlinked doc dir), the 3D plugins -> libkicad_3dsg,
+    plus the schemas."""
     libdir = rootfs / "usr/lib" / multiarch
     info = rootfs / "var/lib/dpkg/info"
     info.mkdir(parents=True)
@@ -63,6 +64,9 @@ def _image(rootfs, extra_lib: str | None = None, multiarch: str = "x86_64-linux-
     make_elf(rootfs / "usr/bin/_eeschema.kiface", needed=("libgit2.so.1.9", *([extra_lib] if extra_lib else [])))
     make_elf(rootfs / "usr/bin/_cvpcb.kiface", needed=("libkicommon.so.10.0.6",))
     make_elf(rootfs / "usr/bin/_pcbnew.kiface", needed=("libkicommon.so.10.0.6",))
+    make_elf(libdir / "libkicad_3dsg.so.2.0.0", soname="libkicad_3dsg.so.2.0.0")
+    for plugin in ("idf", "oce", "vrml"):
+        make_elf(libdir / f"kicad/plugins/3d/libs3d_plugin_{plugin}.so", needed=("libkicad_3dsg.so.2.0.0",))
     if extra_lib:
         make_elf(libdir / extra_lib)
     (rootfs / "usr/share/kicad/schemas").mkdir(parents=True)
@@ -75,8 +79,10 @@ def test_assemble_lays_out_a_relocatable_bundle(tmp_path):
     _image(rootfs)
     sources = linux.assemble(rootfs, root, "10.0.6")
     found = sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file())
-    assert found == ["THIRD-PARTY.txt", "bin/kicad-cli", "lib/libgit2.so.1.9", "lib/libkicommon.so.10.0.6",
-                     "libexec/_cvpcb.kiface", "libexec/_eeschema.kiface", "libexec/_pcbnew.kiface", "libexec/kicad-cli",
+    assert found == ["THIRD-PARTY.txt", "bin/kicad-cli", "lib/libgit2.so.1.9", "lib/libkicad_3dsg.so.2.0.0",
+                     "lib/libkicommon.so.10.0.6", "libexec/_cvpcb.kiface", "libexec/_eeschema.kiface",
+                     "libexec/_pcbnew.kiface", "libexec/kicad-cli", "libexec/plugins/3d/libs3d_plugin_idf.so",
+                     "libexec/plugins/3d/libs3d_plugin_oce.so", "libexec/plugins/3d/libs3d_plugin_vrml.so",
                      "share/doc/libgit2-1.9/copyright",
                      "share/kicad/schemas/api.v1.schema.json"]
     assert os.access(root / "bin/kicad-cli", os.X_OK) and os.access(root / "libexec/kicad-cli", os.X_OK)
@@ -193,7 +199,10 @@ def test_assemble_for_arm64_takes_debians_arm64_libraries_and_says_where_they_co
     rootfs, root = tmp_path / "rootfs", tmp_path / "kicad-cli-10.0.6-linux-arm64"
     _image(rootfs, multiarch="aarch64-linux-gnu")
     sources = linux.assemble(rootfs, root, "10.0.6", simee_sha="4e18395976" + "0" * 30, arch=linux.ARCHES["arm64"])
-    assert sorted(p.name for p in (root / "lib").iterdir()) == ["libgit2.so.1.9", "libkicommon.so.10.0.6"]
+    assert sorted(p.name for p in (root / "lib").iterdir()) == ["libgit2.so.1.9", "libkicad_3dsg.so.2.0.0",
+                                                                 "libkicommon.so.10.0.6"]
+    assert sorted(p.name for p in (root / "libexec/plugins/3d").iterdir()) == [
+        "libs3d_plugin_idf.so", "libs3d_plugin_oce.so", "libs3d_plugin_vrml.so"]
     assert sources == {("libgit2", "1.9.0+ds-2+deb13u1")}
     notice = " ".join((root / "THIRD-PARTY.txt").read_text().split())
     assert notice.startswith("kicad-cli 10.0.6 for Linux arm64, ")
@@ -215,16 +224,16 @@ def test_wrapper_points_kicad_cli_at_the_bundle_even_through_a_symlink(tmp_path)
     (root / "libexec").mkdir()
     linux.write_wrapper(root / "bin/kicad-cli")
     fake = root / "libexec/kicad-cli"
-    fake.write_text('#!/bin/sh\necho "$LD_LIBRARY_PATH|$KICAD_STOCK_DATA_HOME|$*"\n')
+    fake.write_text('#!/bin/sh\necho "$LD_LIBRARY_PATH|$KICAD_STOCK_DATA_HOME|$KICAD_STOCK_3D_PLUGINS_HOME|$*"\n')
     fake.chmod(0o755)
     os.symlink(root / "bin/kicad-cli", tmp_path / "kc")
     env = {"PATH": os.environ["PATH"], "LD_LIBRARY_PATH": "/opt/x"}
     real = root.resolve()
     out = subprocess.run([tmp_path / "kc", "sch", "export"], env=env, capture_output=True, text=True, check=True)
-    assert out.stdout.strip() == f"{real}/lib:/opt/x|{real}/share/kicad|sch export"
-    env = {"PATH": os.environ["PATH"], "KICAD_STOCK_DATA_HOME": "/data"}
+    assert out.stdout.strip() == f"{real}/lib:/opt/x|{real}/share/kicad|{real}/libexec/plugins/3d|sch export"
+    env = {"PATH": os.environ["PATH"], "KICAD_STOCK_DATA_HOME": "/data", "KICAD_STOCK_3D_PLUGINS_HOME": "/3d"}
     out = subprocess.run([root / "bin/kicad-cli"], env=env, capture_output=True, text=True, check=True)
-    assert out.stdout.strip() == f"{real}/lib|/data|"
+    assert out.stdout.strip() == f"{real}/lib|/data|/3d|"
 
 
 def test_smoke_runs_in_a_bare_container_of_the_oldest_supported_host(tmp_path, monkeypatch):

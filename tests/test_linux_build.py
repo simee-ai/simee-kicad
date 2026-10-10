@@ -32,13 +32,22 @@ def test_dockerfile_builds_on_the_official_image_with_its_packages_held():
     for flag in ("-DKICAD_SCRIPTING_WXPYTHON=ON", "-DKICAD_USE_OCC=ON", "-DKICAD_SPICE=ON",
                  "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_INSTALL_PREFIX=/usr"):
         assert flag in text
-    assert "ninja kicad-cli eeschema_kiface cvpcb_kiface pcbnew_kiface" in text
-    assert "-name _cvpcb.kiface" in text and "-name _pcbnew.kiface" in text  # copied out with the rest
+    assert ("ninja kicad-cli eeschema_kiface cvpcb_kiface pcbnew_kiface s3d_plugin_idf s3d_plugin_oce "
+            "s3d_plugin_vrml") in text
+    for name in ("_cvpcb.kiface", "_pcbnew.kiface", "libs3d_plugin_oce.so"):  # copied out with the rest
+        assert f"-name {name}" in text
+
+
+# KiCad's own files a build makes besides its libraries, and where the bundle has them.
+OWN = ("kicad-cli", "_eeschema.kiface", "_cvpcb.kiface", "_pcbnew.kiface", "libs3d_plugin_idf.so",
+       "libs3d_plugin_oce.so", "libs3d_plugin_vrml.so")
+OWN_PLACED = ["libexec/_cvpcb.kiface", "libexec/_eeschema.kiface", "libexec/_pcbnew.kiface", "libexec/kicad-cli",
+              "libexec/plugins/3d/libs3d_plugin_idf.so", "libexec/plugins/3d/libs3d_plugin_oce.so",
+              "libexec/plugins/3d/libs3d_plugin_vrml.so"]
 
 
 def _bundle(root: Path, libs: list[str]) -> None:
-    for rel in ("libexec/kicad-cli", "libexec/_eeschema.kiface", "libexec/_cvpcb.kiface", "libexec/_pcbnew.kiface",
-                *(f"lib/{l}" for l in libs), "lib/libwx.so.0"):
+    for rel in (*OWN_PLACED, *(f"lib/{l}" for l in libs), "lib/libwx.so.0"):
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text("official")
 
@@ -47,13 +56,11 @@ def test_overlay_replaces_kicads_own_files_only(tmp_path):
     root, built = tmp_path / "bundle", tmp_path / "built"
     _bundle(root, ["libkicommon.so.10.0.6", "libkigal.so.10.0.6"])
     built.mkdir()
-    for name in ("kicad-cli", "_eeschema.kiface", "_cvpcb.kiface", "_pcbnew.kiface", "libkicommon.so.10.0.6", "libkigal.so.10.0.6",
+    for name in (*OWN, "libkicommon.so.10.0.6", "libkigal.so.10.0.6",
                  "libkiapi.so.10.0.6"):
         (built / name).write_text("simee")
     replaced = linux_build.overlay(root, built)
-    assert sorted(replaced) == ["lib/libkicommon.so.10.0.6", "lib/libkigal.so.10.0.6",
-                                "libexec/_cvpcb.kiface", "libexec/_eeschema.kiface", "libexec/_pcbnew.kiface",
-                                "libexec/kicad-cli"]
+    assert sorted(replaced) == ["lib/libkicommon.so.10.0.6", "lib/libkigal.so.10.0.6", *OWN_PLACED]
     for rel in replaced:
         assert (root / rel).read_text() == "simee"
     assert (root / "lib/libwx.so.0").read_text() == "official"
@@ -64,7 +71,7 @@ def test_overlay_refuses_to_leave_an_official_kicad_file(tmp_path):
     root, built = tmp_path / "bundle", tmp_path / "built"
     _bundle(root, ["libkicommon.so.10.0.6", "libkigal.so.10.0.6"])
     built.mkdir()
-    for name in ("kicad-cli", "_eeschema.kiface", "_cvpcb.kiface", "_pcbnew.kiface", "libkicommon.so.10.0.6"):
+    for name in (*OWN, "libkicommon.so.10.0.6"):
         (built / name).write_text("simee")
     with pytest.raises(RuntimeError, match="libkigal.so.10.0.6"):
         linux_build.overlay(root, built)
@@ -75,13 +82,11 @@ def test_overlay_of_another_version_swaps_kicads_libraries_for_its_own(tmp_path)
     root, built = tmp_path / "bundle", tmp_path / "built"
     _bundle(root, ["libkicommon.so.10.0.6", "libkigal.so.10.0.6"])
     built.mkdir()
-    for name in ("kicad-cli", "_eeschema.kiface", "_cvpcb.kiface", "_pcbnew.kiface", "libkicommon.so.10.0.7", "libkigal.so.10.0.7",
+    for name in (*OWN, "libkicommon.so.10.0.7", "libkigal.so.10.0.7",
                  "libkiapi.so.10.0.7"):
         (built / name).write_text("simee")
     replaced = linux_build.overlay(root, built)
-    assert sorted(replaced) == ["lib/libkicommon.so.10.0.7", "lib/libkigal.so.10.0.7",
-                                "libexec/_cvpcb.kiface", "libexec/_eeschema.kiface", "libexec/_pcbnew.kiface",
-                                "libexec/kicad-cli"]
+    assert sorted(replaced) == ["lib/libkicommon.so.10.0.7", "lib/libkigal.so.10.0.7", *OWN_PLACED]
     assert sorted(p.name for p in (root / "lib").glob("libki*")) == ["libkicommon.so.10.0.7", "libkigal.so.10.0.7"]
 
 
@@ -150,8 +155,7 @@ def test_runtime_dockerfile_installs_the_official_images_packages_from_debians_a
 def test_native_context_lays_kicads_files_out_where_the_official_image_has_them(tmp_path):
     built, rootfs, context = tmp_path / "built", tmp_path / "rootfs", tmp_path / "context"
     built.mkdir()
-    for name in ("kicad-cli", "_eeschema.kiface", "_cvpcb.kiface", "_pcbnew.kiface", "libkicommon.so.10.0.6",
-                 "dpkg-sources.txt"):
+    for name in (*OWN, "libkicommon.so.10.0.6", "dpkg-sources.txt"):
         (built / name).write_text(name)
     (rootfs / "usr/share/kicad/schemas").mkdir(parents=True)
     (rootfs / "usr/share/kicad/schemas/api.v1.schema.json").write_text("{}")
@@ -159,7 +163,10 @@ def test_native_context_lays_kicads_files_out_where_the_official_image_has_them(
                                ARCHES["arm64"], data=("usr/share/kicad/schemas",))
     found = sorted(str(p.relative_to(context)) for p in context.rglob("*") if p.is_file())
     assert found == ["Dockerfile", "usr/bin/_cvpcb.kiface", "usr/bin/_eeschema.kiface", "usr/bin/_pcbnew.kiface",
-                     "usr/bin/kicad-cli", "usr/lib/aarch64-linux-gnu/libkicommon.so.10.0.6",
+                     "usr/bin/kicad-cli", "usr/lib/aarch64-linux-gnu/kicad/plugins/3d/libs3d_plugin_idf.so",
+                     "usr/lib/aarch64-linux-gnu/kicad/plugins/3d/libs3d_plugin_oce.so",
+                     "usr/lib/aarch64-linux-gnu/kicad/plugins/3d/libs3d_plugin_vrml.so",
+                     "usr/lib/aarch64-linux-gnu/libkicommon.so.10.0.6",
                      "usr/share/kicad/schemas/api.v1.schema.json"]
     assert (context / "Dockerfile").read_text().splitlines() == ["FROM simee-kicad-linux-arm64-runtime", "COPY usr/ /usr/"]
 

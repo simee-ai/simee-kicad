@@ -23,6 +23,7 @@ from kicad_bundle.bundle import KIFACES, archive
 from kicad_bundle.cache import DEBIAN_SOURCES
 from kicad_bundle.closure import closure
 from kicad_bundle.elf import ARCHES, Arch
+from kicad_bundle.linux_build import PLUGINS, PLUGINS_DIR, plugins_dir
 
 IMAGE = "kicad/kicad"
 # The official image's architecture: every other one is built natively (linux_build.native).
@@ -30,19 +31,20 @@ OFFICIAL = ARCHES["x86_64"]
 # The oldest host the bundle supports (glibc 2.39; the image's closure needs no newer symbols), bare,
 # so the smoke test also proves nothing is missing from lib/.
 SMOKE_IMAGE = "ubuntu:24.04"
-ROOTS = ("usr/bin/kicad-cli", *(f"usr/bin/_{k}.kiface" for k in KIFACES))
+# kicad-cli and the kifaces (bundled in libexec/); the 3D plugins are roots too (roots).
+BIN_ROOTS = ("usr/bin/kicad-cli", *(f"usr/bin/_{k}.kiface" for k in KIFACES))
 # Data kicad-cli reads at startup (it logs an error without the API schema).
 DATA = ("usr/share/kicad/schemas",)
 # KiCad's own libraries (no Debian package owns them; the KiCad source covers them).
 KICAD_LIBS = "libki*"
 # What to unpack from the image: the roots, every library and the symlinks leading to them, and
 # dpkg's records and copyright files to say which package each library comes from.
-EXTRACT = (*ROOTS, "usr/lib/", "lib", "lib64", "etc/alternatives/", *(f"{d}/" for d in DATA),
+EXTRACT = (*BIN_ROOTS, "usr/lib/", "lib", "lib64", "etc/alternatives/", *(f"{d}/" for d in DATA),
            debian.DPKG_STATUS, f"{debian.DPKG_INFO}/", "usr/share/doc/")
 
 NOTICE = """kicad-cli {version} for Linux {arch}, {origin}.{simee}
 
-KiCad (libexec/kicad-cli, libexec/*.kiface and lib/{kicad_libs}) is GPL-3.0-or-later. Its source is
+KiCad (libexec/kicad-cli, libexec/*.kiface, libexec/plugins/3d and lib/{kicad_libs}) is GPL-3.0-or-later. Its source is
 kicad-{version}-source.tar.gz, attached to the same GitHub release.
 
 Every other file in lib/ comes unmodified from the Debian package listed below. Each package's
@@ -60,8 +62,16 @@ WRAPPER = """#!/bin/sh
 here=$(dirname "$(dirname "$(readlink -f "$0")")")
 export LD_LIBRARY_PATH="$here/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export KICAD_STOCK_DATA_HOME="${KICAD_STOCK_DATA_HOME:-$here/share/kicad}"
+export KICAD_STOCK_3D_PLUGINS_HOME="${KICAD_STOCK_3D_PLUGINS_HOME:-$here/libexec/plugins/3d}"
 exec "$here/libexec/kicad-cli" "$@"
 """
+
+
+def roots(arch: Arch = OFFICIAL) -> dict[str, str]:
+    """The closure's roots in an image for arch -> where the bundle has them: kicad-cli and the kifaces in
+    libexec/, the 3D plugins (dlopened, so no import reaches them) in PLUGINS_DIR."""
+    return {**{r: f"libexec/{Path(r).name}" for r in BIN_ROOTS},
+            **{f"{plugins_dir(arch)}/{p}": f"{PLUGINS_DIR}/{p}" for p in PLUGINS}}
 
 
 def _docker() -> str:
@@ -108,7 +118,7 @@ is built from, for {arch}, with the official image's Debian packages at the same
 
 def assemble(rootfs: Path, root: Path, version: str, simee_sha: str | None = None,
              image: str | None = None, arch: Arch = OFFICIAL) -> set[tuple[str, str]]:
-    """root/{bin/kicad-cli (wrapper), libexec/ (kicad-cli + kifaces), lib/ (closure), share/kicad/,
+    """root/{bin/kicad-cli (wrapper), libexec/ (kicad-cli, kifaces, plugins/3d/), lib/ (closure), share/kicad/,
     share/doc/<package>/copyright, THIRD-PARTY.txt}. Each library is stored under the DT_NEEDED
     name(s) the loader looks it up by. Returns the Debian (source, version)s the libraries come from.
     image is the official one (default: version's own): rootfs is its export, or for another arch, that of
@@ -122,21 +132,22 @@ def assemble(rootfs: Path, root: Path, version: str, simee_sha: str | None = Non
             names[found].add(name)
         return found
 
-    roots = [elf.resolve_in(rootfs, r) for r in ROOTS]
+    placed = roots(arch)
+    sources = {elf.resolve_in(rootfs, r): dest for r, dest in placed.items()}
     missing: list[tuple[str, str]] = []
-    keep = closure(roots, deps=elf.deps, resolve=resolve, missing=missing)
+    keep = closure(list(sources), deps=elf.deps, resolve=resolve, missing=missing)
     if missing:
         raise RuntimeError(f"unresolved libraries: {missing}")
 
-    libs = sorted(keep - set(roots))
+    libs = sorted(keep - set(sources))
     owned, unowned = debian.provenance(rootfs, libs)
     if strays := [lib.name for lib in unowned if not fnmatch(lib.name, KICAD_LIBS)]:
         raise RuntimeError(f"libraries no Debian package owns, so their licence and source are unknown: {strays}")
 
-    for d in ("bin", "libexec", "lib"):
+    for d in ("bin", "libexec", PLUGINS_DIR, "lib"):
         (root / d).mkdir(parents=True, exist_ok=True)
-    for src, rel in zip(roots, ROOTS):
-        shutil.copy2(src, root / "libexec" / Path(rel).name)
+    for src, dest in sources.items():
+        shutil.copy2(src, root / dest)
     rows = []
     for lib in libs:
         first, *others = sorted(names[lib])
@@ -232,7 +243,8 @@ def package(version: str, out_dir: Path, cache: Path, work: Path, run_smoke: boo
         linux_build.check_sources(official, linux_build.image_sources(native_rootfs), f"the {arch} image has")
         sources = assemble(native_rootfs, root, version, sha, image=image, arch=target)
     if run_smoke:
-        smoke.check(smoke_command(root, target))
+        # Only simee/<version> has KICAD_STOCK_3D_PLUGINS_HOME, which points KiCad at the bundle's 3D plugins.
+        smoke.check(smoke_command(root, target), models=bool(sha))
         if sha:
             imports.check(smoke_command(root, target))
         print(f"  smoke test passed ({SMOKE_IMAGE} {target.docker}{', sch and pcb import' if sha else ''})")

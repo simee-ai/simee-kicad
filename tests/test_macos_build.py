@@ -79,6 +79,11 @@ def test_targets_builds_the_executable_and_each_kiface_in_the_bundle():
     assert targets(files) == ["cvpcb_kiface", "eeschema_kiface", "kicad-cli"]
 
 
+def test_targets_builds_each_3d_plugin_in_the_bundle():
+    files = ["PlugIns/3d/libs3d_plugin_oce.so", "PlugIns/3d/libs3d_plugin_vrml.so"]
+    assert targets(files) == ["s3d_plugin_oce", "s3d_plugin_vrml"]
+
+
 def test_top_dir_ignores_finders_files(tmp_path):
     (tmp_path / ".DS_Store").write_text("finder")
     (tmp_path / "wxWidgets-f9c61658f683").mkdir()

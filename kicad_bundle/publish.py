@@ -57,8 +57,9 @@ def release_notes(version: str, run_url: str, assets: list[str], simee_sha: str 
                   f"https://gitlab.com/kicad/code/kicad/-/tags/{version}")
     return f"""Trimmed `kicad-cli` from {origin}: just what
 `kicad-cli sch ...`, `fp ...` and `pcb ...` need (the schematic, footprint-assignment and PCB modules, so
-ERC, footprint upgrades, gerbers, drill, STEP and SVG exports, headless 3D renders and board imports work,
-and their shared libraries), re-signed ad hoc on macOS.
+ERC, footprint upgrades, gerbers, drill, STEP, VRML and SVG exports, headless 3D renders and board imports
+work, and their shared libraries; and the plugins that load the 3D models a board brings, STEP, VRML and IDF),
+re-signed ad hoc on macOS.
 Unpack and run `kicad-cli` (macOS: `KiCad.app/Contents/MacOS/kicad-cli`; Windows 10 or newer: `bin\\kicad-cli.exe`;
 Linux x86_64 or arm64: `bin/kicad-cli`, which needs glibc 2.39 or newer, e.g. Ubuntu 24.04 or Debian 13).
 Set `KICAD_CONFIG_HOME`, `KICAD_DOCUMENTS_HOME` and `KICAD_CACHE_HOME` to keep it out of the user's home.

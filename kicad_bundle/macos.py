@@ -11,13 +11,14 @@ from pathlib import Path
 
 from kicad_bundle import (imports, macbuilder, macho, macos_build, macos_third_party, release, simee_source, smoke,
                           third_party)
-from kicad_bundle.bundle import KIFACES, archive, copy_tree, prune, remove
+from kicad_bundle.bundle import KIFACES, PLUGINS_3D, archive, copy_tree, prune, remove
 from kicad_bundle.closure import closure
 from kicad_bundle.fetch import fetch_url
 
 ARCHES = ("arm64", "x86_64")
-# kicad-cli and the kifaces it loads; they link the rest.
-ROOTS = ("MacOS/kicad-cli", *(f"PlugIns/_{k}.kiface" for k in KIFACES))
+# kicad-cli, the kifaces and the 3D plugins it loads; they link the rest.
+ROOTS = ("MacOS/kicad-cli", *(f"PlugIns/_{k}.kiface" for k in KIFACES),
+         *(f"PlugIns/3d/libs3d_plugin_{p}.so" for p in PLUGINS_3D))
 TOPS = ("MacOS", "Frameworks", "PlugIns")
 DROP = ("SharedSupport", "Applications", "_CodeSignature")  # libraries, sub-apps, stale signature
 
