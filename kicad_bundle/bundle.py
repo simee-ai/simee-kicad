@@ -10,6 +10,10 @@ from pathlib import Path
 # pcbnew for every `fp` and `pcb` command (gerbers, drill, STEP; it links opencascade).
 # Each platform names a kiface its own way: _<name>.kiface on macOS and Linux, _<name>.dll on Windows.
 KIFACES = ("eeschema", "cvpcb", "pcbnew")
+# KiCad's 3D model plugins (STEP, VRML, IDF), which `pcb render` and the VRML export load a board's models
+# with. KiCad dlopens them from its plugin folder, so no binary's imports reach them: each platform roots its
+# closure at them too. Built by the CMake targets s3d_plugin_<name>.
+PLUGINS_3D = ("idf", "oce", "vrml")
 
 
 def prune(tops: list[Path], keep: set[Path]) -> None:

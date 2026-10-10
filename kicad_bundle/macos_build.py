@@ -1,4 +1,4 @@
-"""KiCad's own macOS binaries (kicad-cli, the kifaces, libki*) built from a simee/<version> source tree
+"""KiCad's own macOS binaries (kicad-cli, the kifaces, the 3D plugins, libki*) built from a simee/<version> source tree
 for one architecture, to replace the official ones in a repackaged DMG. Everything else in the bundle
 stays the official build, so they are built against exactly what it ships: the Homebrew bottles its
 libraries came from (poured into a private prefix, see brew_prefix.py), kicad-mac-builder's wxWidgets
@@ -100,6 +100,8 @@ def targets(files: list[str]) -> list[str]:
         name = rel.rsplit("/", 1)[-1]
         if name.endswith(".kiface"):
             found.add(name.removeprefix("_").removesuffix(".kiface") + "_kiface")
+        elif rel.startswith("PlugIns/3d/"):
+            found.add(name.removeprefix("lib").removesuffix(".so"))
         elif rel.startswith("MacOS/"):
             found.add(name)
     return sorted(found)

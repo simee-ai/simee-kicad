@@ -16,7 +16,7 @@ from kicad_bundle.third_party import Component
 from kicad_bundle.vcpkg import GitRepo, Port, Registry
 
 # KiCad's own files: its source (a separate release asset) covers them.
-KICAD = re.compile(r"kicad-cli\.exe|_\w+\.dll|ki\w*\.dll", re.I)
+KICAD = re.compile(r"kicad-cli\.exe|_\w+\.dll|ki\w*\.dll|s3d_plugin_\w+\.dll", re.I)
 # The Visual C++ runtime, Distributable Code of Visual Studio 2022.
 MSVC = re.compile(r"(vcruntime140(_\d)?|msvcp140(_\w+)?|concrt140|vccorlib140)\.dll", re.I)
 MSVC_TERMS = "https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution#visual-c-runtime-files"

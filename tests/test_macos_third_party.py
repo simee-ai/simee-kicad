@@ -14,7 +14,7 @@ UNTIL = "2026-08-29T15:43:28Z"
 
 def _app(contents: Path, extra: str | None = None) -> list[Path]:
     files = {"MacOS/kicad-cli": b"cli", "PlugIns/_eeschema.kiface": b"kiface",
-             "Frameworks/libkicommon.10.0.6.dylib": b"ki",
+             "Frameworks/libkicommon.10.0.6.dylib": b"ki", "PlugIns/3d/libs3d_plugin_oce.so": b"plugin",
              "Frameworks/libglib-2.0.0.dylib": tiny_macho.fat(("arm64", tiny_macho.thin("arm64", GLIB_ARM)),
                                                               ("x86_64", tiny_macho.thin("x86_64", GLIB_INTEL))),
              "Frameworks/libwx_osx_cocoau-3.2.0.4.1.dylib": "wxWidgets 3.2.8".encode("utf-32-le"),

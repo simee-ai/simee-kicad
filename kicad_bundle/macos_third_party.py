@@ -15,7 +15,7 @@ from kicad_bundle.fetch import Fetch, fetch_url, write_atomically
 from kicad_bundle.third_party import Component, licences
 
 # KiCad's own files: its source (a separate release asset) covers them.
-KICAD = re.compile(r"libki\w*\..+|kicad-cli|_\w+\.kiface")
+KICAD = re.compile(r"libki\w*\..+|kicad-cli|_\w+\.kiface|libs3d_plugin_\w+\.so")
 BUILT = {re.compile(r"libwx_.+\.dylib"): "wxWidgets", re.compile(r"libngspice\..+"): "ngspice",
          re.compile(r"Python"): "Python"}
 NOTICE = """kicad-cli {version} for macOS {arch}, {origin}
@@ -33,11 +33,11 @@ file\tcomponent version\tfrom
 {rows}
 """
 REPACKAGED_KICAD = ("repackaged from the official KiCad {version} DMG.",
-            """KiCad (KiCad.app/Contents/MacOS/kicad-cli, Contents/PlugIns/*.kiface and Contents/Frameworks/libki*)
-is GPL-3.0-or-later. Its source is kicad-{version}-source.tar.gz, attached to the same GitHub release.""")
+            """KiCad (KiCad.app/Contents/MacOS/kicad-cli, Contents/PlugIns/*.kiface, Contents/PlugIns/3d and
+Contents/Frameworks/libki*) is GPL-3.0-or-later. Its source is kicad-{version}-source.tar.gz, attached to the same GitHub release.""")
 REBUILT_KICAD = ("the official KiCad {version} DMG with KiCad's own files rebuilt from simee's modified KiCad.",
-         """KiCad's own files (KiCad.app/Contents/MacOS/kicad-cli, Contents/PlugIns/*.kiface and Contents/Frameworks/libki*)
-are built from a modified KiCad {version}: simee-kicad commit {sha}
+         """KiCad's own files (KiCad.app/Contents/MacOS/kicad-cli, Contents/PlugIns/*.kiface, Contents/PlugIns/3d and
+Contents/Frameworks/libki*) are built from a modified KiCad {version}: simee-kicad commit {sha}
 (https://github.com/simee-ai/simee-kicad), which adds changes on top of KiCad's {version} tag (see its
 history). KiCad is GPL-3.0-or-later; the modified source is kicad-{version}-source.tar.gz, attached to
 the same GitHub release. They are built against exactly the libraries listed below.""")

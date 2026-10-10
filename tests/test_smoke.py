@@ -83,6 +83,7 @@ M30
 """
 FOOTPRINT = '(footprint "R_Axial_P5.08mm"\n\t(version 20260206)\n)\n'
 STEP = "ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\nENDSEC;\nEND-ISO-10303-21;\n"
+VRML = "#VRML V2.0 utf8\nWorldInfo { title \"rc_filter\" }\n"
 # Trimmed from kicad-cli 10.0.6's `pcb export svg` of the smoke board (board area only).
 SVG = """<?xml version="1.0" standalone="no"?>
  <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
@@ -109,11 +110,13 @@ OUTPUTS = {
                            ("rc_filter-Edge_Cuts.gm1", EDGE_CUTS)],
     "pcb export drill": [("rc_filter.drl", DRILL)],
     "pcb export step": [("", STEP)],
+    "pcb export vrml": [("", VRML)],
     "pcb export svg": [("", SVG)],
     "pcb render": [("", _png(*RENDER_SIZE))],
 }
 
-FAKE_CLI = """import sys
+FAKE_CLI = """import re
+import sys
 from pathlib import Path
 args = sys.argv[1:]
 out = Path(args[args.index("-o") + 1])
@@ -121,7 +124,10 @@ outputs = {outputs!r}
 cmd = next(c for c in outputs if args[:len(c.split())] == c.split())
 if cmd == {fail!r}:
     {code}
+board = Path(args[-1]).read_text() if args[-1].endswith(".kicad_pcb") else ""
 for name, text in outputs[cmd]:
+    if cmd == "pcb render" and {draws_models!r}:  # a model changes the image
+        text += "".join(re.findall(r'[(]model "[^"]+"', board)).encode()
     if name:
         out.mkdir(parents=True, exist_ok=True)
     path = out / name if name else out
@@ -129,12 +135,13 @@ for name, text in outputs[cmd]:
 """
 
 
-def _fake_cli(tmp_path: Path, fail: str = "", code: str = "pass", **outputs: list) -> list[str]:
+def _fake_cli(tmp_path: Path, fail: str = "", code: str = "pass", draws_models: bool = True,
+              **outputs: list) -> list[str]:
     """A kicad-cli that writes OUTPUTS (or outputs, keyed by command with _ for spaces), except that
-    the command fail runs code first."""
+    the command fail runs code first. Its renders draw a board's 3D models unless draws_models is False."""
     script = tmp_path / "kicad_cli.py"
     script.write_text(FAKE_CLI.format(outputs={**OUTPUTS, **{k.replace("_", " "): v for k, v in outputs.items()}},
-                                      fail=fail, code=code))
+                                      fail=fail, code=code, draws_models=draws_models))
     return [sys.executable, str(script)]
 
 
@@ -165,7 +172,7 @@ def test_check_fails_when_erc_cant_load_a_kiface(tmp_path):
 
 
 @pytest.mark.parametrize("command", ["fp upgrade", "pcb export gerbers", "pcb export drill", "pcb export step",
-                                     "pcb export svg", "pcb render"])
+                                     "pcb export vrml", "pcb export svg", "pcb render"])
 def test_check_fails_when_a_pcb_command_cant_load_pcbnew(tmp_path, command):
     # The trimmed bundle's failure before pcbnew was bundled (simee-kicad#8): exit 255, nothing written.
     fail = ("print(\"Error: Failed to load kiface library '/x/PlugIns/_pcbnew.kiface'.\", file=sys.stderr); "
@@ -195,6 +202,25 @@ def test_check_fails_when_fp_upgrade_leaves_the_old_format(tmp_path):
 def test_check_fails_on_a_step_file_that_isnt_one(tmp_path):
     with pytest.raises(RuntimeError, match="STEP"):
         smoke.check(_fake_cli(tmp_path, pcb_export_step=[("", "")]))
+
+
+def test_check_fails_when_the_render_draws_no_3d_models(tmp_path):
+    # A bundle without the 3D plugins renders a board that brings its own models bare (simee-kicad#28).
+    with pytest.raises(RuntimeError, match="model"):
+        smoke.check(_fake_cli(tmp_path, draws_models=False))
+
+
+def test_check_can_leave_the_3d_models_out(tmp_path):
+    # An official Linux bundle has the plugins but no way to point KiCad at them (simee/<version> adds it).
+    smoke.check(_fake_cli(tmp_path, draws_models=False), models=False)
+
+
+def test_with_model_gives_the_first_footprint_a_3d_model():
+    board = smoke.parse_sexpr(smoke.with_model(smoke.BOARD.read_text(), "${KIPRJMOD}/model.step"))
+    footprints = [c for c in board if isinstance(c, list) and c[0] == "footprint"]
+    models = [[m[1] for m in fp if isinstance(m, list) and m[0] == "model"] for fp in footprints]
+    assert models[0] == ["${KIPRJMOD}/model.step"]
+    assert not any(models[1:])
 
 
 def test_svg_size_reads_the_drawings_size_in_mm():
@@ -241,6 +267,7 @@ def test_the_smoke_board_is_the_rc_filters_layout():
     rect = next(c for c in board if isinstance(c, list) and c[0] == "gr_rect")
     (x0, y0), (x1, y1) = (map(float, next(c[1:] for c in rect if isinstance(c, list) and c[0] == k)) for k in ("start", "end"))
     assert (x1 - x0, y1 - y0) == BOARD_SIZE
+    assert ((x0 + x1) / 2, (y0 + y1) / 2) == smoke.BOARD_CENTRE
 
 
 @pytest.mark.parametrize("kiface", ["cvpcb", "pcbnew"])
@@ -248,5 +275,15 @@ def test_every_platform_bundles_and_builds_the_kifaces_simee_runs(kiface):
     # `sch erc` loads cvpcb's kiface for its footprint checks (simee-kicad#7); every `fp` and `pcb`
     # command loads pcbnew's (simee-kicad#8). Without them those commands fail.
     assert f"PlugIns/_{kiface}.kiface" in macos.ROOTS
-    assert f"usr/bin/_{kiface}.kiface" in linux.ROOTS
+    assert f"usr/bin/_{kiface}.kiface" in linux.roots(linux.OFFICIAL)
     assert f"{kiface}_kiface" in windows_build.TARGETS
+
+
+@pytest.mark.parametrize("plugin", ["idf", "oce", "vrml"])
+def test_every_platform_bundles_and_builds_the_3d_model_plugins(plugin):
+    # KiCad dlopens them from its plugin folder, so no binary's imports reach them (simee-kicad#28).
+    assert f"PlugIns/3d/libs3d_plugin_{plugin}.so" in macos.ROOTS
+    assert f"usr/lib/x86_64-linux-gnu/kicad/plugins/3d/libs3d_plugin_{plugin}.so" in linux.roots(linux.OFFICIAL)
+    assert f"usr/lib/aarch64-linux-gnu/kicad/plugins/3d/libs3d_plugin_{plugin}.so" in linux.roots(linux.ARCHES["arm64"])
+    assert f"s3d_plugin_{plugin}" in windows_build.TARGETS
+    assert f"plugins/3d/s3d_plugin_{plugin}.dll" in windows_build.PLUGINS  # under bin/

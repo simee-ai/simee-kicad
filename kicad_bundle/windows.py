@@ -44,7 +44,10 @@ def package(version: str, out_dir: Path, cache: Path, work: Path, run_smoke: boo
     else:
         raise RuntimeError("kicad-cli.exe not found in the installer")
     kifaces = [next(cli.parent.glob(f"_{k}.dll"), None) or next(extracted.rglob(f"_{k}.dll")) for k in KIFACES]
-    keep = closure([cli, *kifaces], deps=pe.deps,
+    plugins = [cli.parent / p for p in windows_build.PLUGINS]  # dlopened: no import reaches them
+    if missing := [p.name for p in plugins if not p.is_file()]:
+        raise RuntimeError(f"the installer has no {', '.join(missing)} next to kicad-cli.exe")
+    keep = closure([cli, *kifaces, *plugins], deps=pe.deps,
                    resolve=pe.make_resolver(sorted({cli.parent, *(k.parent for k in kifaces)})))
 
     root = work / f"kicad-cli-{version}-windows-{arch}"
